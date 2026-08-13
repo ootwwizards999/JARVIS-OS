@@ -25,12 +25,20 @@ function cron(overrides: Partial<AgentCron> & { id: string }): AgentCron {
 type RunRow = Parameters<FounderDb['agentRuns']['insert']>[0];
 
 /**
- * A run started `deltaSeconds` from AT. Uses the extended agent_runs shape
- * from the LCI-5 schema change (status / lane / decisionType, nullable
- * finishedAt). The cast keeps this file compiling against the pre-migration
- * AgentRun type; at runtime the repo's own Zod parse enforces the real shape.
+ * A run started `deltaSeconds` from AT, claimed for `cronId`. Uses the
+ * extended agent_runs shape from the LCI-5 schema change (status / lane /
+ * decisionType / cronId, nullable finishedAt). dueNow suppression keys on
+ * cron_id + minute (spec gap resolution #2). The cast keeps this file
+ * compiling against the pre-migration AgentRun type; at runtime the repo's
+ * own Zod parse enforces the real shape.
  */
-function run(id: string, agentId: string, deltaSeconds: number, opts?: { finished?: boolean }): RunRow {
+function run(
+  id: string,
+  agentId: string,
+  cronId: string | null,
+  deltaSeconds: number,
+  opts?: { finished?: boolean },
+): RunRow {
   const startedAt = new Date(AT.getTime() + deltaSeconds * 1000).toISOString();
   const finished = opts?.finished ?? false;
   const row = {
@@ -43,6 +51,7 @@ function run(id: string, agentId: string, deltaSeconds: number, opts?: { finishe
     status: finished ? 'ok' : 'running',
     lane: 'build-light',
     decisionType: 'code.implement',
+    cronId,
   };
   return row as unknown as RunRow;
 }
@@ -83,33 +92,44 @@ describe('agentCrons.dueNow', () => {
   });
 
   describe('idempotency — a cron already dispatched in the same minute is not returned again', () => {
-    test('an in-flight run (status=running) started in the same minute suppresses the cron', () => {
+    test('an in-flight run (status=running) claimed for this cron in the same minute suppresses it', () => {
       db = openDb(':memory:');
       db.agentCrons.insert(cron({ id: 'c-due' }));
       // Claim row written by a previous replay of this exact tick, 20s in.
-      db.agentRuns.insert(run('r-claim', 'spiritguide-web', 20));
+      db.agentRuns.insert(run('r-claim', 'spiritguide-web', 'c-due', 20));
       expect(db.agentCrons.dueNow(AT)).toEqual([]);
     });
 
-    test('a run that already finished within the same minute still suppresses the cron', () => {
+    test("a run for this cron that already finished within the same minute still suppresses it", () => {
       db = openDb(':memory:');
       db.agentCrons.insert(cron({ id: 'c-due' }));
-      db.agentRuns.insert(run('r-done', 'spiritguide-web', 10, { finished: true }));
+      db.agentRuns.insert(run('r-done', 'spiritguide-web', 'c-due', 10, { finished: true }));
       expect(db.agentCrons.dueNow(AT)).toEqual([]);
     });
 
-    test('a run started in the PREVIOUS minute does not suppress the cron', () => {
+    test('a run for this cron started in the PREVIOUS minute does not suppress it', () => {
       db = openDb(':memory:');
       db.agentCrons.insert(cron({ id: 'c-due' }));
-      db.agentRuns.insert(run('r-old', 'spiritguide-web', -30)); // 10:04:30
+      db.agentRuns.insert(run('r-old', 'spiritguide-web', 'c-due', -30)); // 10:04:30
       expect(db.agentCrons.dueNow(AT).map((d) => d.id)).toEqual(['c-due']);
     });
 
-    test("another agent's run in the same minute does not suppress this cron", () => {
+    test("another agent's run (a different cron's claim) in the same minute does not suppress this cron", () => {
       db = openDb(':memory:');
       db.agentCrons.insert(cron({ id: 'c-due' }));
-      db.agentRuns.insert(run('r-other', 'some-other-agent', 15));
+      db.agentRuns.insert(run('r-other', 'some-other-agent', 'c-other', 15));
       expect(db.agentCrons.dueNow(AT).map((d) => d.id)).toEqual(['c-due']);
+    });
+
+    test('suppression is keyed per cron: a SAME-AGENT sibling cron due in the same minute is still returned', () => {
+      // The scenario that motivated cron_id keying (spec gap resolution #2):
+      // two crons for one agent, both due; only the already-claimed one is
+      // suppressed.
+      db = openDb(':memory:');
+      db.agentCrons.insert(cron({ id: 'c-claimed' }));
+      db.agentCrons.insert(cron({ id: 'c-sibling', createdAt: '2026-08-02T00:00:00.000Z' }));
+      db.agentRuns.insert(run('r-claim', 'spiritguide-web', 'c-claimed', 20));
+      expect(db.agentCrons.dueNow(AT).map((d) => d.id)).toEqual(['c-sibling']);
     });
   });
 });
