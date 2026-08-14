@@ -3,11 +3,20 @@
  * displayed here; the actual runner lands with the dedicated host deployment — the
  * OS is honest about that in the UI.
  */
-const FIELD_RE = /^(\*|[0-9*/,-]+)$/;
+// One comma-separated token: `*`, `*/n`, `a`, `a/n`, `a-b`, or `a-b/n` — the
+// exact grammar `tokenMatches` below can evaluate. A prior looser regex
+// (`[0-9*/,-]+`) accepted syntax the matcher couldn't honour — comma lists,
+// `7`-as-Sunday, and step-offset were the first three instances of that gap
+// (LCI-5 review round 1, F3); `a-b/n` was the fourth (round 2, C5). Validator
+// and matcher must agree on syntax, or a schedule can validate and silently
+// never fire. (Out-of-range *values*, e.g. minute `61`, are intentionally
+// still accepted here — `tokenMatches`/`fieldMatches` range-check at match
+// time and simply never match; see tests/cron-match.test.ts.)
+const TOKEN_RE = /^(\*(\/\d+)?|\d+(\/\d+)?|\d+-\d+(\/\d+)?)$/;
 
 export function isValidCron(expr: string): boolean {
   const fields = expr.trim().split(/\s+/);
-  return fields.length === 5 && fields.every((f) => FIELD_RE.test(f) && !/[a-z]/i.test(f));
+  return fields.length === 5 && fields.every((f) => f.split(',').every((token) => TOKEN_RE.test(token)));
 }
 
 /**
@@ -25,10 +34,28 @@ function tokenMatches(token: string, value: number, min: number, max: number): b
     const n = Number(step[1]);
     return n > 0 && (value - min) % n === 0;
   }
+  // A range with a step (e.g. `9-17/2`) steps from the range's own start, not
+  // from `min` — `isValidCron`'s grammar accepted this syntax without the
+  // matcher honouring it, so `0 9-17/2 * * *` validated and silently never
+  // fired (LCI-5 review round 2, C5).
+  const rangeStep = token.match(/^(\d+)-(\d+)\/(\d+)$/);
+  if (rangeStep) {
+    const [a, b, n] = [Number(rangeStep[1]), Number(rangeStep[2]), Number(rangeStep[3])];
+    return n > 0 && a <= b && b <= max && value >= a && value <= b && (value - a) % n === 0;
+  }
   const range = token.match(/^(\d+)-(\d+)$/);
   if (range) {
     const [a, b] = [Number(range[1]), Number(range[2])];
     return a <= b && b <= max && value >= a && value <= b;
+  }
+  // A bare value with a step (e.g. `5/15`) steps from that value, not from
+  // `min` — standard cron syntax, and syntactically indistinguishable from
+  // digits-and-slash under the old validator regex (LCI-5 review round 2,
+  // C5 audit).
+  const valueStep = token.match(/^(\d+)\/(\d+)$/);
+  if (valueStep) {
+    const [a, n] = [Number(valueStep[1]), Number(valueStep[2])];
+    return n > 0 && a <= max && value >= a && (value - a) % n === 0;
   }
   if (/^\d+$/.test(token)) {
     const n = Number(token);

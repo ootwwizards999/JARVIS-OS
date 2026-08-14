@@ -46,6 +46,21 @@ export type DispatchDecision = {
   reason: string;
 };
 
+/**
+ * Effective autonomy level a permitted decision runs AT — capped by the
+ * operator's ceiling for `decisionType`, even when the agent is more trusted
+ * than that ceiling allows (round-4 resolution, item 3). This is the value
+ * the spawner needs to know what powers to grant the worker: an autonomy-4
+ * agent doing `code.implement` (ceiling 3) runs AT L3 — it may open a PR, it
+ * may never arm a merge (LCI-5 review round 2, C2). A `decisionType` with no
+ * policy entry has already been refused by `evaluateDispatch`, so it passes
+ * the raw autonomy through unchanged — the value is moot on a denial.
+ */
+export function effectiveAutonomy(decisionType: string, autonomy: number): number {
+  const policy = DECISION_POLICY[decisionType];
+  return policy ? Math.min(autonomy, policy.ceiling) : autonomy;
+}
+
 export function evaluateDispatch(db: FounderDb, req: DispatchRequest): DispatchDecision {
   const policy = DECISION_POLICY[req.decisionType];
   if (!policy) {

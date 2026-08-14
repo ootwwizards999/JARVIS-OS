@@ -1,7 +1,7 @@
 import { randomUUID } from 'node:crypto';
 import type { FounderDb } from '@/lib/db';
 import { resolveAgentLane } from '@/lib/agents/lanes';
-import { evaluateDispatch, type DenialKind } from '@/lib/agents/governor';
+import { evaluateDispatch, effectiveAutonomy, type DenialKind } from '@/lib/agents/governor';
 
 /**
  * Tick engine (LCI-5). Thin tick + detached workers: `planTick` decides,
@@ -17,6 +17,18 @@ export type DispatchDecision = {
   permitted: boolean;
   kind?: DenialKind;
   reason: string;
+  /**
+   * Set only on a claimed (permitted + dispatched) decision: the exact
+   * `agent_runs.id` and `startedAt` this decision claimed. Two crons for the
+   * same lane can both be due in the same minute, so `agentId`/`cronId` alone
+   * don't identify which claim a given worker belongs to — the spawner
+   * (next ticket) needs `runId` to durably complete the right row (LCI-5
+   * review round 2, C3). Undefined on denied/unclaimed decisions. `autonomy`
+   * on a claimed decision is the EFFECTIVE (ceiling-capped) level, not the
+   * agent's raw autonomy — see `effectiveAutonomy` (LCI-5 review round 2, C2).
+   */
+  runId?: string;
+  startedAt?: string;
 };
 
 /** Pure: decides what a tick at `now` would do. Writes nothing. */
@@ -43,7 +55,7 @@ export function planTick(db: FounderDb, now: Date): DispatchDecision[] {
 }
 
 /**
- * Plans, then claims and dispatches every permitted decision. The claim
+ * Plans, then claims every permitted decision and dispatches it. The claim
  * (status='running', finishedAt=null) is written BEFORE `dispatch` is
  * called, so a replay of the same tick minute sees it via `dueNow` and skips
  * it — that's what makes the tick idempotent to retry. `dispatch` is never
@@ -62,15 +74,26 @@ export function planTick(db: FounderDb, now: Date): DispatchDecision[] {
  * concurrently against the same DB file can't interleave with it either
  * (F6) — it blocks (via `busy_timeout`) until this tick commits, then plans
  * against the post-commit state.
+ *
+ * `dispatch` itself runs AFTER the transaction commits, not inside it (LCI-5
+ * review round 2, C4). A real detached worker opens its OWN DB connection —
+ * if it were spawned from inside the still-open `BEGIN IMMEDIATE`, it could
+ * start before the claim is durable, race the commit, or hit SQLITE_BUSY and
+ * never record completion, wedging the lane on a permanent `running` claim.
+ * Claims are collected while the transaction runs, then dispatched in a
+ * second pass once it has returned (and therefore committed) — the TOCTOU
+ * protection from F6 is unaffected, because claiming still happens entirely
+ * inside the transaction.
  */
 export function runTick(
   db: FounderDb,
   now: Date,
   dispatch: (decision: DispatchDecision) => void,
 ): DispatchDecision[] {
-  return db.transaction((): DispatchDecision[] => {
-    const decisions = planTick(db, now);
-    return decisions.map((decision) => {
+  const claimed: DispatchDecision[] = [];
+
+  const decisions = db.transaction((): DispatchDecision[] => {
+    return planTick(db, now).map((decision) => {
       if (!decision.permitted) return decision;
 
       const recheck = evaluateDispatch(db, {
@@ -83,10 +106,12 @@ export function runTick(
         return { ...decision, permitted: false, kind: recheck.kind, reason: recheck.reason };
       }
 
+      const runId = randomUUID();
+      const startedAt = now.toISOString();
       db.agentRuns.insert({
-        id: randomUUID(),
+        id: runId,
         agentId: decision.agentId,
-        startedAt: now.toISOString(),
+        startedAt,
         finishedAt: null,
         ok: false,
         summary: '',
@@ -95,8 +120,22 @@ export function runTick(
         decisionType: decision.decisionType,
         cronId: decision.cronId,
       });
-      dispatch(decision);
-      return decision;
+
+      // Carry the EFFECTIVE (ceiling-capped) autonomy downstream, not the
+      // agent's raw value — the dispatcher must never see enough authority
+      // to act above the operator's ceiling for this decision type (C2).
+      const claim: DispatchDecision = {
+        ...decision,
+        autonomy: effectiveAutonomy(decision.decisionType, decision.autonomy),
+        runId,
+        startedAt,
+      };
+      claimed.push(claim);
+      return claim;
     });
   });
+
+  for (const decision of claimed) dispatch(decision);
+
+  return decisions;
 }
