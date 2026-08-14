@@ -152,8 +152,13 @@ export function runTick(
       // The claim never actually started — release it so it doesn't sit as
       // 'running' forever and wedge the lane. Reuses agentRuns.insert's
       // INSERT OR REPLACE upsert (same idiom lib/agents/runtime.ts uses for
-      // a failed run): omitting `status` defaults it back to 'ok', which
-      // `runningInLane` does not count.
+      // a failed run). Status is explicit `'failed'` here rather than left to
+      // default to `'ok'` (lib/db.ts) — `runningInLane` only ever matches
+      // `status = 'running'` so either value stops it from wedging the lane,
+      // but a released dispatch failure IS a failure and `runVerdict`
+      // (lib/agents/run-verdict.ts) would already classify it that way from
+      // `ok: false` alone; writing `'ok'` here was a trap for the next reader
+      // who trusts the status column directly (LCI-5 review round 4).
       const message = err instanceof Error ? err.message : String(err);
       db.agentRuns.insert({
         id: decision.runId,
@@ -162,6 +167,7 @@ export function runTick(
         finishedAt: now.toISOString(),
         ok: false,
         summary: `dispatch failed: ${message}`,
+        status: 'failed',
         lane: decision.lane,
         decisionType: decision.decisionType,
         cronId: decision.cronId,

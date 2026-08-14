@@ -5,6 +5,7 @@
  * existing repos.
  */
 import { ActivityEventSchema, type ActivityEvent } from '@/lib/schemas';
+import { runVerdict } from '@/lib/agents/run-verdict';
 import type { FounderDb } from '@/lib/db';
 
 export function recentActivity(db: FounderDb, limit = 50): ActivityEvent[] {
@@ -13,11 +14,12 @@ export function recentActivity(db: FounderDb, limit = 50): ActivityEvent[] {
   for (const run of db.agentRuns.recent(limit)) {
     // A scheduler claim (status='running') is written with a placeholder
     // `ok: false` before its worker has reported back (lib/agents/scheduler.ts)
-    // — that is not a failure, it's in-flight. Only a run whose status is
-    // NOT 'running' has an `ok` verdict worth rendering; the feed must never
-    // show an in-progress run as a red FAIL (LCI-5 review round 4, missed by
-    // round 1's fix to the roster card / analytics pie / harness cards).
-    const ok = run.status === 'running' ? undefined : run.ok;
+    // — that is not a failure, it's in-flight. `runVerdict` is the single
+    // source of truth for that distinction (lib/agents/run-verdict.ts); the
+    // feed must never show an in-progress run as a red FAIL (LCI-5 review
+    // round 4, missed by round 1's fix to the roster card / analytics pie /
+    // harness cards).
+    const ok = runVerdict(run) === 'running' ? undefined : run.ok;
     events.push({ kind: 'run', agentId: run.agentId, at: run.startedAt, summary: run.summary, ok });
   }
 
