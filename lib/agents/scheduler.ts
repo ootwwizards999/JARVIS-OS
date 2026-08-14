@@ -84,13 +84,23 @@ export function planTick(db: FounderDb, now: Date): DispatchDecision[] {
  * second pass once it has returned (and therefore committed) — the TOCTOU
  * protection from F6 is unaffected, because claiming still happens entirely
  * inside the transaction.
+ *
+ * Each dispatch is isolated: a `dispatch` that throws (e.g. `claude` missing
+ * from PATH → spawn ENOENT, or ENOMEM/EMFILE on a loaded box) must not skip
+ * the claims after it — every claimed decision is still offered to the
+ * dispatcher. A claim whose dispatch throws never actually started, so its
+ * `agent_runs` row is released immediately: finished, `ok: false`, a summary
+ * naming the failure, and — critically — a status other than `'running'` so
+ * it stops counting against `runningInLane` and doesn't wedge the lane's
+ * capacity forever (LCI-5 review round 4, found independently by both
+ * reviewers).
  */
 export function runTick(
   db: FounderDb,
   now: Date,
   dispatch: (decision: DispatchDecision) => void,
 ): DispatchDecision[] {
-  const claimed: DispatchDecision[] = [];
+  const claimed: (DispatchDecision & { runId: string; startedAt: string })[] = [];
 
   const decisions = db.transaction((): DispatchDecision[] => {
     return planTick(db, now).map((decision) => {
@@ -124,7 +134,7 @@ export function runTick(
       // Carry the EFFECTIVE (ceiling-capped) autonomy downstream, not the
       // agent's raw value — the dispatcher must never see enough authority
       // to act above the operator's ceiling for this decision type (C2).
-      const claim: DispatchDecision = {
+      const claim: DispatchDecision & { runId: string; startedAt: string } = {
         ...decision,
         autonomy: effectiveAutonomy(decision.decisionType, decision.autonomy),
         runId,
@@ -135,7 +145,29 @@ export function runTick(
     });
   });
 
-  for (const decision of claimed) dispatch(decision);
+  for (const decision of claimed) {
+    try {
+      dispatch(decision);
+    } catch (err) {
+      // The claim never actually started — release it so it doesn't sit as
+      // 'running' forever and wedge the lane. Reuses agentRuns.insert's
+      // INSERT OR REPLACE upsert (same idiom lib/agents/runtime.ts uses for
+      // a failed run): omitting `status` defaults it back to 'ok', which
+      // `runningInLane` does not count.
+      const message = err instanceof Error ? err.message : String(err);
+      db.agentRuns.insert({
+        id: decision.runId,
+        agentId: decision.agentId,
+        startedAt: decision.startedAt,
+        finishedAt: now.toISOString(),
+        ok: false,
+        summary: `dispatch failed: ${message}`,
+        lane: decision.lane,
+        decisionType: decision.decisionType,
+        cronId: decision.cronId,
+      });
+    }
+  }
 
   return decisions;
 }

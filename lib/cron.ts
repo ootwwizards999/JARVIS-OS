@@ -3,65 +3,118 @@
  * displayed here; the actual runner lands with the dedicated host deployment — the
  * OS is honest about that in the UI.
  */
-// One comma-separated token: `*`, `*/n`, `a`, `a/n`, `a-b`, or `a-b/n` — the
-// exact grammar `tokenMatches` below can evaluate. A prior looser regex
-// (`[0-9*/,-]+`) accepted syntax the matcher couldn't honour — comma lists,
-// `7`-as-Sunday, and step-offset were the first three instances of that gap
-// (LCI-5 review round 1, F3); `a-b/n` was the fourth (round 2, C5). Validator
-// and matcher must agree on syntax, or a schedule can validate and silently
-// never fire. (Out-of-range *values*, e.g. minute `61`, are intentionally
-// still accepted here — `tokenMatches`/`fieldMatches` range-check at match
-// time and simply never match; see tests/cron-match.test.ts.)
-const TOKEN_RE = /^(\*(\/\d+)?|\d+(\/\d+)?|\d+-\d+(\/\d+)?)$/;
+
+/**
+ * The parsed shape of ONE comma-separated cron token. This is the single
+ * source of truth for cron grammar (LCI-5 review rounds 1-3, ten findings —
+ * always `isValidCron` and `matchesCron` disagreeing about what a token
+ * means). `isValidCron` and `tokenMatches` both call `parseToken` and ONLY
+ * `parseToken` — neither re-implements the grammar. A token `parseToken`
+ * rejects can never reach the matcher (isValidCron gates every call site
+ * that runs `matchesCron`), and the matcher has no notion of "valid" beyond
+ * "did this parse" — so validator/matcher disagreement is structurally
+ * impossible, not just fixed for the currently-known cases.
+ */
+type ParsedToken =
+  | { kind: 'star' }
+  | { kind: 'star-step'; step: number }
+  | { kind: 'value'; value: number }
+  | { kind: 'value-step'; value: number; step: number }
+  | { kind: 'range'; from: number; to: number }
+  | { kind: 'range-step'; from: number; to: number; step: number };
+
+/**
+ * Parses one comma-separated cron token (`*`, `*` slash `n`, `a`, `a/n`,
+ * `a-b`, or `a-b/n`) into its structured form, or `null` if it is not valid cron
+ * syntax. Deliberately field-agnostic: this enforces grammar SHAPE and
+ * structural sanity (a step must be `> 0`; a range must not be reversed,
+ * `a <= b`) but NOT per-field value bounds (e.g. minute `0-59`) — those are
+ * intentionally deferred to match time. See tests/cron-match.test.ts: an
+ * out-of-range value like minute `61` is syntactically valid and simply
+ * never matches; that behavior is preserved here on purpose (LCI-5 review
+ * round 4).
+ */
+function parseToken(token: string): ParsedToken | null {
+  if (token === '*') return { kind: 'star' };
+
+  const starStep = token.match(/^\*\/(\d+)$/);
+  if (starStep) {
+    const step = Number(starStep[1]);
+    return step > 0 ? { kind: 'star-step', step } : null;
+  }
+
+  const rangeStep = token.match(/^(\d+)-(\d+)\/(\d+)$/);
+  if (rangeStep) {
+    const [from, to, step] = [Number(rangeStep[1]), Number(rangeStep[2]), Number(rangeStep[3])];
+    return step > 0 && from <= to ? { kind: 'range-step', from, to, step } : null;
+  }
+
+  const range = token.match(/^(\d+)-(\d+)$/);
+  if (range) {
+    const [from, to] = [Number(range[1]), Number(range[2])];
+    return from <= to ? { kind: 'range', from, to } : null;
+  }
+
+  const valueStep = token.match(/^(\d+)\/(\d+)$/);
+  if (valueStep) {
+    const [value, step] = [Number(valueStep[1]), Number(valueStep[2])];
+    return step > 0 ? { kind: 'value-step', value, step } : null;
+  }
+
+  if (/^\d+$/.test(token)) return { kind: 'value', value: Number(token) };
+
+  return null;
+}
 
 export function isValidCron(expr: string): boolean {
   const fields = expr.trim().split(/\s+/);
-  return fields.length === 5 && fields.every((f) => f.split(',').every((token) => TOKEN_RE.test(token)));
+  return fields.length === 5 && fields.every((f) => f.split(',').every((token) => parseToken(token) !== null));
 }
 
 /**
- * True if `value` satisfies a single cron token (one comma-separated item):
- * `*`, `N`, a step (`*` slash `n`), or an `a-b` range. `min` is the field's
- * lowest valid value (0 for minute/hour/day-of-week, 1 for day-of-month/
- * month) — standard cron steps the range from its START, not from 0, so a
- * step on a 1-based field (e.g. `*` slash `2` on day-of-month) has to offset
- * against `min` or it lands on the wrong days (LCI-5 review round 1, F3).
+ * True if `value` satisfies a single cron token, using the SAME parse
+ * `isValidCron` used to decide the token was legal — see `parseToken`.
+ * `min` is the field's lowest valid value (0 for minute/hour/day-of-week, 1
+ * for day-of-month/month):
+ *  - a step (`*` slash `n`) offsets from `min`, not from 0 — standard cron
+ *    steps a 1-based field from its own start (LCI-5 review round 1, F3).
+ *  - a range/range-step is enforced against BOTH `min` and `max` on its own
+ *    endpoints, not just `max` — a range whose lower bound is below the
+ *    field's minimum (e.g. day-of-month `0-2`, since day-of-month has no
+ *    day 0) can never legitimately match anything, matching the "invalid
+ *    values never match" philosophy above rather than silently firing on
+ *    the in-range remainder of the token (LCI-5 review round 3: `0-2`
+ *    fired on the 1st and 2nd because only the upper bound was checked).
  */
 function tokenMatches(token: string, value: number, min: number, max: number): boolean {
-  if (token === '*') return true;
-  const step = token.match(/^\*\/(\d+)$/);
-  if (step) {
-    const n = Number(step[1]);
-    return n > 0 && (value - min) % n === 0;
+  const parsed = parseToken(token);
+  if (!parsed) return false;
+
+  switch (parsed.kind) {
+    case 'star':
+      return true;
+    case 'star-step':
+      return (value - min) % parsed.step === 0;
+    case 'value':
+      return parsed.value >= min && parsed.value <= max && parsed.value === value;
+    case 'value-step':
+      return (
+        parsed.value >= min &&
+        parsed.value <= max &&
+        value >= parsed.value &&
+        (value - parsed.value) % parsed.step === 0
+      );
+    case 'range':
+      return parsed.from >= min && parsed.to <= max && value >= parsed.from && value <= parsed.to;
+    case 'range-step':
+      return (
+        parsed.from >= min &&
+        parsed.to <= max &&
+        value >= parsed.from &&
+        value <= parsed.to &&
+        (value - parsed.from) % parsed.step === 0
+      );
   }
-  // A range with a step (e.g. `9-17/2`) steps from the range's own start, not
-  // from `min` — `isValidCron`'s grammar accepted this syntax without the
-  // matcher honouring it, so `0 9-17/2 * * *` validated and silently never
-  // fired (LCI-5 review round 2, C5).
-  const rangeStep = token.match(/^(\d+)-(\d+)\/(\d+)$/);
-  if (rangeStep) {
-    const [a, b, n] = [Number(rangeStep[1]), Number(rangeStep[2]), Number(rangeStep[3])];
-    return n > 0 && a <= b && b <= max && value >= a && value <= b && (value - a) % n === 0;
-  }
-  const range = token.match(/^(\d+)-(\d+)$/);
-  if (range) {
-    const [a, b] = [Number(range[1]), Number(range[2])];
-    return a <= b && b <= max && value >= a && value <= b;
-  }
-  // A bare value with a step (e.g. `5/15`) steps from that value, not from
-  // `min` — standard cron syntax, and syntactically indistinguishable from
-  // digits-and-slash under the old validator regex (LCI-5 review round 2,
-  // C5 audit).
-  const valueStep = token.match(/^(\d+)\/(\d+)$/);
-  if (valueStep) {
-    const [a, n] = [Number(valueStep[1]), Number(valueStep[2])];
-    return n > 0 && a <= max && value >= a && (value - a) % n === 0;
-  }
-  if (/^\d+$/.test(token)) {
-    const n = Number(token);
-    return n <= max && n === value;
-  }
-  return false;
 }
 
 /**
@@ -81,21 +134,25 @@ function fieldMatches(field: string, value: number, min: number, max: number): b
  */
 export function matchesCron(expr: string, at: Date): boolean {
   if (!isValidCron(expr)) return false;
-  const [min, hour, dom, month, dowRaw] = expr.trim().split(/\s+/);
-  // Standard cron allows both 0 and 7 for Sunday in the day-of-week field;
-  // JS Date#getDay() only ever returns 0-6. Normalize whole-token 7s to 0 so
-  // a schedule written with 7 still matches a real Sunday (LCI-5 review
-  // round 1, F3).
-  const dow = dowRaw
-    .split(',')
-    .map((token) => (token === '7' ? '0' : token))
-    .join(',');
+  const [min, hour, dom, month, dow] = expr.trim().split(/\s+/);
+  const day = at.getDay(); // JS convention: 0-6, Sunday = 0
+
+  // Standard cron allows both 0 and 7 for Sunday in the day-of-week field.
+  // The alias can appear anywhere a value can — a bare `7`, inside a range
+  // (`5-7`), or with a step (`7/2`, `1-7/2`) — so instead of rewriting
+  // tokens (which only ever caught the bare-`7` case), the field's own
+  // upper bound is 7, not 6, and a real Sunday (day === 0) is checked
+  // against BOTH its JS value and its cron alias. `5-7` (Fri-Sun) and
+  // `0-7` (every day, standard and legal) previously validated and then
+  // silently never matched (LCI-5 review round 3).
+  const dowMatches = fieldMatches(dow, day, 0, 7) || (day === 0 && fieldMatches(dow, 7, 0, 7));
+
   return (
     fieldMatches(min, at.getMinutes(), 0, 59) &&
     fieldMatches(hour, at.getHours(), 0, 23) &&
     fieldMatches(dom, at.getDate(), 1, 31) &&
     fieldMatches(month, at.getMonth() + 1, 1, 12) &&
-    fieldMatches(dow, at.getDay(), 0, 6)
+    dowMatches
   );
 }
 

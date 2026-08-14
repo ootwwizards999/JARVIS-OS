@@ -11,7 +11,14 @@ export function recentActivity(db: FounderDb, limit = 50): ActivityEvent[] {
   const events: ActivityEvent[] = [];
 
   for (const run of db.agentRuns.recent(limit)) {
-    events.push({ kind: 'run', agentId: run.agentId, at: run.startedAt, summary: run.summary, ok: run.ok });
+    // A scheduler claim (status='running') is written with a placeholder
+    // `ok: false` before its worker has reported back (lib/agents/scheduler.ts)
+    // — that is not a failure, it's in-flight. Only a run whose status is
+    // NOT 'running' has an `ok` verdict worth rendering; the feed must never
+    // show an in-progress run as a red FAIL (LCI-5 review round 4, missed by
+    // round 1's fix to the roster card / analytics pie / harness cards).
+    const ok = run.status === 'running' ? undefined : run.ok;
+    events.push({ kind: 'run', agentId: run.agentId, at: run.startedAt, summary: run.summary, ok });
   }
 
   for (const msg of db.agentMessages.recent(limit)) {
