@@ -1,6 +1,7 @@
 import { afterEach, describe, expect, test } from 'vitest';
 import { openDb, type FounderDb } from '@/lib/db';
 import { resolveAgentLane } from '@/lib/agents/lanes';
+import { evaluateDispatch } from '@/lib/agents/governor';
 import { planTick } from '@/lib/agents/scheduler';
 
 let db: FounderDb;
@@ -13,25 +14,6 @@ afterEach(() => {
 const AT = new Date('2026-08-13T10:05:00');
 
 const UNKNOWN_AGENT = 'agent-never-registered';
-
-type RunRow = Parameters<FounderDb['agentRuns']['insert']>[0];
-
-/** A foreign in-flight run consuming no-build capacity (extended LCI-5 shape). */
-function runningNoBuild(id: string): RunRow {
-  const row = {
-    id,
-    agentId: `other-${id}`,
-    startedAt: '2026-08-13T09:00:00.000Z', // not in AT's minute — never suppresses
-    finishedAt: null,
-    ok: false,
-    summary: '',
-    status: 'running',
-    lane: 'no-build',
-    decisionType: 'ticket.triage',
-    cronId: null,
-  };
-  return row as unknown as RunRow;
-}
 
 function unknownAgentCron(d: FounderDb) {
   d.agentCrons.insert({
@@ -70,15 +52,42 @@ describe('lanes registry — fail-safe resolution', () => {
   });
 });
 
-describe('fail-safe defaults hold on the real dispatch path (planTick → governor)', () => {
-  // A registry that returns safe values but is never consulted — or one that
-  // falls open to a permissive lane — cannot pass these: the unknown agent
-  // must be governed under the no-build cap (6), not build-light/build-heavy
-  // and not skipped.
+describe('fail-safe defaults hold on the real dispatch path (registry → governor)', () => {
+  // A registry that returns safe values but is never consulted cannot pass
+  // these: the resolved values flow into the gate, and under the corrected
+  // autonomy model (requires + ceiling) autonomy 1 is refused everything.
 
-  test('an unknown agent is governed as no-build: DENIED when the no-build lane is saturated', () => {
+  test('end-to-end: an unknown agent attempting code.implement is DENIED, as not-trusted-enough', () => {
     db = openDb(':memory:');
-    for (let i = 0; i < 6; i++) db.agentRuns.insert(runningNoBuild(`nb-${i}`));
+    const resolved = resolveAgentLane(UNKNOWN_AGENT);
+
+    const decision = evaluateDispatch(db, {
+      agentId: UNKNOWN_AGENT,
+      lane: resolved.lane,
+      decisionType: 'code.implement',
+      autonomy: resolved.autonomy,
+    });
+    expect(decision.permitted).toBe(false);
+    expect(typeof decision.reason).toBe('string');
+    expect(decision.reason).not.toBe('');
+
+    // Specifically the not-trusted-enough denial, not the policy one: the
+    // reason must differ from a policy-forbidden denial for the same agent.
+    const policyDenied = evaluateDispatch(db, {
+      agentId: UNKNOWN_AGENT,
+      lane: resolved.lane,
+      decisionType: 'merge.arm',
+      autonomy: resolved.autonomy,
+    });
+    expect(policyDenied.permitted).toBe(false);
+    expect(decision.reason).not.toBe(policyDenied.reason);
+  });
+
+  test("planTick refuses an unknown agent's cron on the no-build lane — never silently drops it", () => {
+    // Refused, not skipped: the decision must surface (with the resolved
+    // safest lane) so the denial is visible in {denied, reasons}, rather
+    // than the cron vanishing from the tick.
+    db = openDb(':memory:');
     unknownAgentCron(db);
 
     const decisions = planTick(db, AT);
@@ -90,22 +99,5 @@ describe('fail-safe defaults hold on the real dispatch path (planTick → govern
     });
     expect(typeof decisions[0].reason).toBe('string');
     expect(decisions[0].reason).not.toBe('');
-  });
-
-  test('an unknown agent stays dispatchable under the safest defaults when the lane has room', () => {
-    // Safest, not skipped: with one no-build slot free, the unknown agent's
-    // cron is planned and permitted — proving the denial above is the lane
-    // cap doing its job, not the registry dropping unregistered agents.
-    db = openDb(':memory:');
-    for (let i = 0; i < 5; i++) db.agentRuns.insert(runningNoBuild(`nb-${i}`));
-    unknownAgentCron(db);
-
-    const decisions = planTick(db, AT);
-    expect(decisions).toHaveLength(1);
-    expect(decisions[0]).toMatchObject({
-      agentId: UNKNOWN_AGENT,
-      lane: 'no-build',
-      permitted: true,
-    });
   });
 });
