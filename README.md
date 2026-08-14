@@ -20,9 +20,12 @@ you explore and run it yourself.
 
 ## Quick start
 
-Requires **Node 18+**.
+Requires **Node 22** (pinned in `.nvmrc` and `package.json` `engines`).
+`better-sqlite3` ships prebuilt binaries for Node 22; on Node 25/26 there is no
+prebuild and the native compile fails against the newer V8 headers.
 
 ```bash
+nvm use                      # or: export PATH="$(brew --prefix node@22)/bin:$PATH"
 npm install
 cp .env.example .env.local   # optional; only needed to wire live integrations
 npm run dev                  # http://localhost:4100
