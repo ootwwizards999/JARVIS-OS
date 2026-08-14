@@ -1,0 +1,70 @@
+name: CI
+
+on:
+  pull_request:
+    branches: [main]
+  push:
+    branches: [main]
+
+# A newer push to the same PR cancels the older run — no point burning a runner
+# on a commit that has already been superseded.
+concurrency:
+  group: ci-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
+jobs:
+  # The job NAME is load-bearing. The org ruleset requires a check called exactly
+  # "Build & Test"; any other name leaves every PR blocked on a check that never
+  # arrives. Do not rename this without updating the ruleset first.
+  build-and-test:
+    name: Build & Test
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+
+    steps:
+      - uses: actions/checkout@v4
+
+      # node-version-file reads .nvmrc so there is ONE source of truth for the
+      # Node version. This is not a style preference: better-sqlite3 publishes no
+      # prebuilt binary for Node 25/26 and its native compile fails against newer
+      # V8 headers. Pinning a version inline here would let CI drift from local
+      # and reintroduce that failure.
+      - uses: actions/setup-node@v4
+        with:
+          node-version-file: .nvmrc
+          cache: npm
+
+      - name: Verify Node version
+        run: |
+          echo "node $(node -v) / npm $(npm -v)"
+          case "$(node -v)" in
+            v22.*) ;;
+            *) echo "::error::expected Node 22 (see .nvmrc); better-sqlite3 has no prebuild for 25/26"; exit 1 ;;
+          esac
+
+      - name: Install
+        run: npm ci
+
+      # If better-sqlite3 fell back to a source build, the Node version is wrong
+      # and CI is one runner upgrade away from breaking. Fail loudly now rather
+      # than discovering it during an unrelated PR.
+      - name: Assert better-sqlite3 used a prebuild
+        run: |
+          if [ -d node_modules/better-sqlite3/build/Release ] \
+             && [ ! -f node_modules/better-sqlite3/build/Release/better_sqlite3.node ]; then
+            echo "::error::better-sqlite3 did not produce a loadable binary"
+            exit 1
+          fi
+          node -e "require('better-sqlite3'); console.log('better-sqlite3 loads OK')"
+
+      - name: Test
+        run: npm test
+
+      - name: Typecheck
+        run: npm run typecheck
+
+      - name: Build
+        run: npm run build
