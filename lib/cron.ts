@@ -10,6 +10,43 @@ export function isValidCron(expr: string): boolean {
   return fields.length === 5 && fields.every((f) => FIELD_RE.test(f) && !/[a-z]/i.test(f));
 }
 
+/** True if `value` satisfies a single cron field: `*`, `N`, a `*` step, or an `a-b` range. */
+function fieldMatches(field: string, value: number, max: number): boolean {
+  if (field === '*') return true;
+  const step = field.match(/^\*\/(\d+)$/);
+  if (step) {
+    const n = Number(step[1]);
+    return n > 0 && value % n === 0;
+  }
+  const range = field.match(/^(\d+)-(\d+)$/);
+  if (range) {
+    const [a, b] = [Number(range[1]), Number(range[2])];
+    return a <= b && b <= max && value >= a && value <= b;
+  }
+  if (/^\d+$/.test(field)) {
+    const n = Number(field);
+    return n <= max && n === value;
+  }
+  return false; // comma lists etc. are valid per isValidCron but unsupported here
+}
+
+/**
+ * Standard 5-field cron match at minute granularity — seconds are ignored.
+ * Invalid expressions (wrong field count, non-cron syntax, out-of-range
+ * values) never throw; they simply never match.
+ */
+export function matchesCron(expr: string, at: Date): boolean {
+  if (!isValidCron(expr)) return false;
+  const [min, hour, dom, month, dow] = expr.trim().split(/\s+/);
+  return (
+    fieldMatches(min, at.getMinutes(), 59) &&
+    fieldMatches(hour, at.getHours(), 23) &&
+    fieldMatches(dom, at.getDate(), 31) &&
+    fieldMatches(month, at.getMonth() + 1, 12) &&
+    fieldMatches(dow, at.getDay(), 6)
+  );
+}
+
 const DOW = ['Sun', 'Mon', 'Tue', 'Wed', 'Thu', 'Fri', 'Sat'];
 
 function dowLabel(field: string): string | null {

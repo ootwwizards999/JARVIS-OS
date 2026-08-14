@@ -25,7 +25,7 @@ export type PillarAxis = {
 const clamp = (lo: number, hi: number, v: number) => Math.min(hi, Math.max(lo, v));
 
 function runRecency(latest: AgentRun | undefined, now: number): number {
-  if (!latest) return 0;
+  if (!latest?.finishedAt) return 0;
   const h = (now - new Date(latest.finishedAt).getTime()) / 3_600_000;
   if (!Number.isFinite(h) || h < 0) return 0;
   if (h <= 1) return 1;
@@ -48,7 +48,7 @@ export function pillarRadarAxes(
     const latest = roster
       .map((a) => runsByAgent[a.id])
       .filter((r): r is AgentRun => !!r)
-      .sort((a, b) => b.finishedAt.localeCompare(a.finishedAt))[0];
+      .sort((a, b) => (b.finishedAt ?? '').localeCompare(a.finishedAt ?? ''))[0];
     // freshest run wins; recency evaluated against the newest run's own clock
     // domain (Date.now at call time — deterministic within a render)
     const recency = runRecency(latest, Date.now());

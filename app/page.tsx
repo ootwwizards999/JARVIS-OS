@@ -308,7 +308,7 @@ export default async function HomePage() {
                     </div>
                     <div className="mt-0.5 truncate font-mono text-[10.5px] text-os-dim">
                       {departments.get(a.departmentId) ?? '—'} ·{' '}
-                      {last ? `last run ${last.ok ? 'OK' : 'FAILED'} · ${relativeTime(last.finishedAt)} ago` : 'never run'}
+                      {last ? `last run ${last.ok ? 'OK' : 'FAILED'} · ${relativeTime(last.finishedAt ?? last.startedAt)} ago` : 'never run'}
                     </div>
                   </div>
                   <span
@@ -339,7 +339,7 @@ export default async function HomePage() {
                   <span className={`shrink-0 font-bold ${r.ok ? 'text-os-ok' : 'text-os-err'}`}>{r.ok ? 'OK' : 'FAIL'}</span>
                   <span className="shrink-0 text-os-muted">{r.agentId}</span>
                   <span className="min-w-0 flex-1 truncate text-os-dim">{r.summary}</span>
-                  <span className="shrink-0 text-os-dim">{relativeTime(r.finishedAt)}</span>
+                  <span className="shrink-0 text-os-dim">{relativeTime(r.finishedAt ?? r.startedAt)}</span>
                 </li>
               ))}
             </ul>
