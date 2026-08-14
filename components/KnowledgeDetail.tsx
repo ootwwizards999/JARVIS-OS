@@ -7,6 +7,7 @@ import type { AgentWiki, ToolWiki } from '@/lib/agent-wiki';
 import type { Personnel } from '@/lib/personnel';
 import type { MemoryNode } from '@/lib/memory-core';
 import type { Person, RosterClient, SopTask } from '@/lib/schemas';
+import { runVerdict } from '@/lib/agents/run-verdict';
 
 export type AgentLite = { id: string; name: string; role: string; model: string };
 export type ToolLite = { id: string; slug: string; name: string; mcp: boolean };
@@ -151,7 +152,7 @@ export function AgentHarnessCard({
   parentName: string | null;
   parentAgentId: string | null;
   subAgents: { id: string; name: string }[];
-  lastRun: { ok: boolean; summary: string } | null;
+  lastRun: { ok: boolean; summary: string; status?: string } | null;
   /** relative time of the last run, precomputed by the caller */
   runLabel?: string | null;
   headName?: string | null;
@@ -234,18 +235,28 @@ export function AgentHarnessCard({
         </div>
 
         <SectionLabel icon={FileText}>last run</SectionLabel>
-        {lastRun ? (
-          <div className="flex items-start gap-2">
-            <span
-              className="mt-1 h-2 w-2 shrink-0 rounded-full"
-              style={{ background: lastRun.ok ? 'var(--ok, #3df08c)' : 'var(--err, #ff6259)' }}
-            />
-            <p className="text-[11px] leading-relaxed text-os-muted">
-              {lastRun.summary}
-              {runLabel && <span className="font-mono text-[9.5px] text-os-dim"> · {runLabel}</span>}
-            </p>
-          </div>
-        ) : (
+        {lastRun ? (() => {
+          const verdict = runVerdict(lastRun);
+          return (
+            <div className="flex items-start gap-2">
+              <span
+                className="mt-1 h-2 w-2 shrink-0 rounded-full"
+                style={{
+                  background:
+                    verdict === 'running'
+                      ? 'var(--warn, #ffb000)'
+                      : verdict === 'ok'
+                        ? 'var(--ok, #3df08c)'
+                        : 'var(--err, #ff6259)',
+                }}
+              />
+              <p className="text-[11px] leading-relaxed text-os-muted">
+                {verdict === 'running' ? 'running…' : lastRun.summary}
+                {runLabel && <span className="font-mono text-[9.5px] text-os-dim"> · {runLabel}</span>}
+              </p>
+            </div>
+          );
+        })() : (
           <p className="font-mono text-[10.5px] text-os-dim">never run — trigger it from /agents</p>
         )}
       </div>

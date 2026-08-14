@@ -15,6 +15,7 @@ import { PageHeader } from '@/components/PageHeader';
 import { HomeSocialGraph } from '@/components/HomeSocialGraph';
 import { Badge, Dot, Kbd, Label, SectionHead, Spark } from '@/components/terminal';
 import { runsPerDay, inboundPerDay, stateOfWorld, type Tone } from '@/lib/pulse-history';
+import { runVerdict, isFailedRun } from '@/lib/agents/run-verdict';
 import type { ConnectorStatus } from '@/lib/connectors/types';
 
 export const dynamic = 'force-dynamic';
@@ -147,7 +148,7 @@ export default async function HomePage() {
   const health = overview.doctor.healthScore;
   const inbound = inboundLast24h(feed);
   const runCount = recentRuns.length;
-  const failedRuns = recentRuns.filter((r) => !r.ok).length;
+  const failedRuns = recentRuns.filter(isFailedRun).length;
   // Real sparkline series from actual history — no synthetic arrays.
   const agentsSpark = runsPerDay(runsForSpark, 7);
   const commsSpark = inboundPerDay(feed, 7);
@@ -248,14 +249,19 @@ export default async function HomePage() {
         <div className="os-ticker-track py-[9px] pl-[90px]">
           {[0, 1].map((copy) => (
             <div key={copy} className="flex shrink-0 gap-[26px] pr-[26px]">
-              {ticker.map((r) => (
-                <span key={copy + r.id} className="inline-flex items-center gap-2 whitespace-nowrap font-mono text-[11px]">
-                  <b className={r.ok ? 'text-os-ok' : 'text-os-err'}>{r.ok ? 'OK' : 'FAIL'}</b>
-                  <span className="text-os-muted">{r.agentId}</span>
-                  <span className="text-os-dim">{r.summary}</span>
-                  <span className="text-os-border-strong">·</span>
-                </span>
-              ))}
+              {ticker.map((r) => {
+                const verdict = runVerdict(r);
+                return (
+                  <span key={copy + r.id} className="inline-flex items-center gap-2 whitespace-nowrap font-mono text-[11px]">
+                    <b className={verdict === 'ok' ? 'text-os-ok' : verdict === 'running' ? 'text-os-warn' : 'text-os-err'}>
+                      {verdict === 'ok' ? 'OK' : verdict === 'running' ? 'RUNNING' : 'FAIL'}
+                    </b>
+                    <span className="text-os-muted">{r.agentId}</span>
+                    <span className="text-os-dim">{r.summary}</span>
+                    <span className="text-os-border-strong">·</span>
+                  </span>
+                );
+              })}
             </div>
           ))}
         </div>
@@ -308,7 +314,9 @@ export default async function HomePage() {
                     </div>
                     <div className="mt-0.5 truncate font-mono text-[10.5px] text-os-dim">
                       {departments.get(a.departmentId) ?? '—'} ·{' '}
-                      {last ? `last run ${last.ok ? 'OK' : 'FAILED'} · ${relativeTime(last.finishedAt)} ago` : 'never run'}
+                      {last
+                        ? `last run ${{ running: 'RUNNING', ok: 'OK', failed: 'FAILED' }[runVerdict(last)]} · ${relativeTime(last.finishedAt ?? last.startedAt)} ago`
+                        : 'never run'}
                     </div>
                   </div>
                   <span
@@ -331,17 +339,22 @@ export default async function HomePage() {
           <div>
             <SectionHead label="Recent runs" count={recentRuns.length} />
             <ul className="flex flex-col gap-1.5">
-              {recentRuns.slice(0, 6).map((r) => (
-                <li
-                  key={r.id}
-                  className="flex items-baseline gap-2.5 rounded-sm-t border border-os-border bg-os-surface px-3 py-2 font-mono text-[11px]"
-                >
-                  <span className={`shrink-0 font-bold ${r.ok ? 'text-os-ok' : 'text-os-err'}`}>{r.ok ? 'OK' : 'FAIL'}</span>
-                  <span className="shrink-0 text-os-muted">{r.agentId}</span>
-                  <span className="min-w-0 flex-1 truncate text-os-dim">{r.summary}</span>
-                  <span className="shrink-0 text-os-dim">{relativeTime(r.finishedAt)}</span>
-                </li>
-              ))}
+              {recentRuns.slice(0, 6).map((r) => {
+                const verdict = runVerdict(r);
+                return (
+                  <li
+                    key={r.id}
+                    className="flex items-baseline gap-2.5 rounded-sm-t border border-os-border bg-os-surface px-3 py-2 font-mono text-[11px]"
+                  >
+                    <span className={`shrink-0 font-bold ${verdict === 'ok' ? 'text-os-ok' : verdict === 'running' ? 'text-os-warn' : 'text-os-err'}`}>
+                      {verdict === 'ok' ? 'OK' : verdict === 'running' ? 'RUNNING' : 'FAIL'}
+                    </span>
+                    <span className="shrink-0 text-os-muted">{r.agentId}</span>
+                    <span className="min-w-0 flex-1 truncate text-os-dim">{r.summary}</span>
+                    <span className="shrink-0 text-os-dim">{relativeTime(r.finishedAt ?? r.startedAt)}</span>
+                  </li>
+                );
+              })}
             </ul>
           </div>
 

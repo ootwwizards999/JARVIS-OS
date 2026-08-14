@@ -1,5 +1,5 @@
 import Database from 'better-sqlite3';
-import { isValidCron } from '@/lib/cron';
+import { isValidCron, matchesCron } from '@/lib/cron';
 import {
   AgentCronSchema,
   AgentMessageSchema,
@@ -34,6 +34,7 @@ import {
   type AgentCron,
   type AgentMessage,
   type AgentRun,
+  type AgentRunClaim,
   type AgentTask,
   type Broadcast,
   type BroadcastReply,
@@ -140,9 +141,13 @@ CREATE TABLE IF NOT EXISTS agent_runs (
   id TEXT PRIMARY KEY,
   agent_id TEXT NOT NULL,
   started_at TEXT NOT NULL,
-  finished_at TEXT NOT NULL,
+  finished_at TEXT,
   ok INTEGER NOT NULL,
-  summary TEXT NOT NULL DEFAULT ''
+  summary TEXT NOT NULL DEFAULT '',
+  status TEXT NOT NULL DEFAULT 'ok',
+  lane TEXT,
+  decision_type TEXT,
+  cron_id TEXT
 );
 CREATE TABLE IF NOT EXISTS agent_messages (
   id TEXT PRIMARY KEY,
@@ -338,6 +343,52 @@ function migrateSkillsTable(db: InstanceType<typeof Database>): void {
   }
 }
 
+// LCI-5 scheduler columns, additive. Databases created before the tick engine
+// lack status/lane/decision_type/cron_id, and finished_at was NOT NULL — the
+// scheduler's claim row is written with finished_at = NULL until the worker
+// reports back, so that constraint has to go. SQLite can't drop a NOT NULL
+// via ALTER TABLE, so the rebuild only runs when it's actually needed.
+function migrateAgentRunsTable(db: InstanceType<typeof Database>): void {
+  const info = db.pragma('table_info(agent_runs)') as { name: string; notnull: number }[];
+  const columns = new Set(info.map((c) => c.name));
+  if (!columns.has('status')) db.exec("ALTER TABLE agent_runs ADD COLUMN status TEXT NOT NULL DEFAULT 'ok'");
+  if (!columns.has('lane')) db.exec('ALTER TABLE agent_runs ADD COLUMN lane TEXT');
+  if (!columns.has('decision_type')) db.exec('ALTER TABLE agent_runs ADD COLUMN decision_type TEXT');
+  if (!columns.has('cron_id')) db.exec('ALTER TABLE agent_runs ADD COLUMN cron_id TEXT');
+
+  const finishedAtCol = info.find((c) => c.name === 'finished_at');
+  if (finishedAtCol?.notnull) {
+    // Atomic: CREATE + copy + DROP + RENAME all commit together or not at
+    // all (BEGIN IMMEDIATE also grabs the write lock up front, so a second
+    // process booting concurrently against the same file blocks — via
+    // busy_timeout below — instead of racing this rebuild). A crash mid-way
+    // now just rolls back to the untouched original table; the leading DROP
+    // IF EXISTS makes a retry idempotent even against a stray
+    // `agent_runs_new` left by an old, pre-fix crash. (LCI-5 review round 1, F2)
+    db.transaction(() => {
+      db.exec(`
+        DROP TABLE IF EXISTS agent_runs_new;
+        CREATE TABLE agent_runs_new (
+          id TEXT PRIMARY KEY,
+          agent_id TEXT NOT NULL,
+          started_at TEXT NOT NULL,
+          finished_at TEXT,
+          ok INTEGER NOT NULL,
+          summary TEXT NOT NULL DEFAULT '',
+          status TEXT NOT NULL DEFAULT 'ok',
+          lane TEXT,
+          decision_type TEXT,
+          cron_id TEXT
+        );
+        INSERT INTO agent_runs_new (id, agent_id, started_at, finished_at, ok, summary, status, lane, decision_type, cron_id)
+          SELECT id, agent_id, started_at, finished_at, ok, summary, status, lane, decision_type, cron_id FROM agent_runs;
+        DROP TABLE agent_runs;
+        ALTER TABLE agent_runs_new RENAME TO agent_runs;
+      `);
+    }).immediate();
+  }
+}
+
 type AgentRow = {
   id: string;
   department_id: string;
@@ -371,10 +422,17 @@ function rowToAgent(row: AgentRow): Agent {
 export function openDb(path: string) {
   const db = new Database(path);
   db.pragma('journal_mode = WAL');
+  // Two processes on the same DB file (concurrent dev servers/sessions is
+  // the norm here) can both want the write lock at once — a boot-time
+  // migration or a scheduler tick's BEGIN IMMEDIATE. Without a busy timeout
+  // the loser gets an immediate SQLITE_BUSY throw instead of just waiting
+  // the few ms for the winner to commit. (LCI-5 review round 1, F2/F6)
+  db.pragma('busy_timeout = 5000');
   db.exec(DDL);
   migrateAgentsTable(db);
   migrateFunnelContactsTable(db);
   migrateSkillsTable(db);
+  migrateAgentRunsTable(db);
 
   const departments = {
     all(): Department[] {
@@ -553,6 +611,14 @@ export function openDb(path: string) {
   };
 
   const rowToRun = (r: any): AgentRun =>
+    // AgentRunSchema.parse is the real runtime shape (finishedAt nullable for
+    // an in-flight scheduler claim); the shared AgentRun type keeps finishedAt
+    // as a plain string for the pre-LCI-5 call sites that assume completion —
+    // see the type's doc comment in lib/schemas.ts. Reads that CAN see an
+    // in-flight claim (KnowledgeGraph/NeuralDetail's "last run" card) treat
+    // finishedAt as possibly null at the call site despite this type's claim
+    // (LCI-5 review round 1, F4) — the cast stays because widening the shared
+    // type breaks tests/runtime.test.ts's frozen finishedAt assertion.
     AgentRunSchema.parse({
       id: r.id,
       agentId: r.agent_id,
@@ -560,7 +626,11 @@ export function openDb(path: string) {
       finishedAt: r.finished_at,
       ok: Boolean(r.ok),
       summary: r.summary,
-    });
+      status: r.status,
+      lane: r.lane,
+      decisionType: r.decision_type,
+      cronId: r.cron_id,
+    }) as AgentRun;
 
   const agentRuns = {
     byAgent(agentId: string): AgentRun[] {
@@ -575,10 +645,29 @@ export function openDb(path: string) {
         .all(limit)
         .map(rowToRun);
     },
-    insert(run: AgentRun): void {
+    /** Count of currently in-flight runs (status='running') on a lane — the governor's concurrency signal. */
+    runningInLane(lane: string): number {
+      const row = db
+        .prepare("SELECT COUNT(*) AS n FROM agent_runs WHERE lane = ? AND status = 'running'")
+        .get(lane) as { n: number };
+      return row.n;
+    },
+    /** `finishedAt` may be null: an in-flight claim written by the scheduler before its worker reports back. */
+    insert(run: AgentRunClaim): void {
       db.prepare(
-        'INSERT OR REPLACE INTO agent_runs (id, agent_id, started_at, finished_at, ok, summary) VALUES (?, ?, ?, ?, ?, ?)',
-      ).run(run.id, run.agentId, run.startedAt, run.finishedAt, run.ok ? 1 : 0, run.summary);
+        'INSERT OR REPLACE INTO agent_runs (id, agent_id, started_at, finished_at, ok, summary, status, lane, decision_type, cron_id) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)',
+      ).run(
+        run.id,
+        run.agentId,
+        run.startedAt,
+        run.finishedAt,
+        run.ok ? 1 : 0,
+        run.summary,
+        run.status ?? 'ok',
+        run.lane ?? null,
+        run.decisionType ?? null,
+        run.cronId ?? null,
+      );
     },
   };
 
@@ -710,6 +799,25 @@ export function openDb(path: string) {
     },
     remove(id: string): void {
       db.prepare('DELETE FROM agent_crons WHERE id = ?').run(id);
+    },
+    /**
+     * Enabled crons whose schedule matches `at`, minus any already claimed
+     * this minute — a claim is any agent_runs row for that cron_id whose
+     * started_at falls in the same minute (LCI-5). Keyed on cron_id, not
+     * agent_id, so a sibling cron for the same agent due in the same minute
+     * isn't wrongly suppressed. Replaying a tick within the same minute is
+     * therefore idempotent: the already-claimed cron drops out.
+     */
+    dueNow(at: Date): AgentCron[] {
+      const atMinute = Math.floor(at.getTime() / 60_000);
+      const claimStmt = db.prepare('SELECT started_at FROM agent_runs WHERE cron_id = ?');
+      return agentCrons
+        .all()
+        .filter((c) => c.enabled && matchesCron(c.schedule, at))
+        .filter((c) => {
+          const claims = claimStmt.all(c.id) as { started_at: string }[];
+          return !claims.some((r) => Math.floor(new Date(r.started_at).getTime() / 60_000) === atMinute);
+        });
     },
   };
 
@@ -1092,6 +1200,15 @@ export function openDb(path: string) {
     sopTasks,
     workflows,
     skills,
+    /**
+     * Runs `fn` inside a single `BEGIN IMMEDIATE` transaction on this
+     * connection: the write lock is taken up front (not on first write), so
+     * a second process racing the same DB file blocks on `busy_timeout`
+     * instead of interleaving reads/writes with this one. Used by the
+     * scheduler tick to close the plan+claim cross-process TOCTOU (LCI-5
+     * review round 1, F6).
+     */
+    transaction: <T>(fn: () => T): T => db.transaction(fn).immediate(),
     close: () => db.close(),
   };
 }

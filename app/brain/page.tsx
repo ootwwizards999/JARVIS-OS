@@ -243,7 +243,7 @@ export default async function BrainPage() {
                 {doctor.connected ? (warnings.length > 0 ? 'warnings' : 'ok') : 'unreachable'}
               </span>
               <span>
-                {lastBrainRun ? `last run ${relativeTime(lastBrainRun.finishedAt)} · data-agent` : 'no agent runs yet'}
+                {lastBrainRun ? `last run ${relativeTime(lastBrainRun.finishedAt ?? lastBrainRun.startedAt)} · data-agent` : 'no agent runs yet'}
               </span>
             </div>
             <div className="flex flex-col gap-1 text-right">

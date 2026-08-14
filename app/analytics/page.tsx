@@ -11,6 +11,7 @@ import { stripeSnapshot } from '@/lib/connectors/payments';
 import { unreadCounts } from '@/lib/connectors/email';
 import { beehiivSubscribers } from '@/lib/connectors/beehiiv';
 import type { SocialPlatform } from '@/lib/schemas';
+import { runVerdict } from '@/lib/agents/run-verdict';
 import type { PieItem } from '@/lib/social-chart';
 import { PageHeader } from '@/components/PageHeader';
 import { Badge, Label, SectionHead, Spark } from '@/components/terminal';
@@ -229,11 +230,17 @@ export default async function AnalyticsPage() {
   const tailRuns = rankedAgents.slice(6).reduce((s, [, n]) => s + n, 0);
   if (tailRuns > 0) runsByAgentItems.push({ key: 'other', label: 'Other agents', value: tailRuns });
 
-  // Run outcomes — reliability at a glance.
-  const okRuns = runs.filter((r) => r.ok).length;
+  // Run outcomes — reliability at a glance. In-flight runs (status='running')
+  // haven't succeeded or failed yet — they get their own slice instead of
+  // falling into "Failed" by default (LCI-5 review round 1, F5).
+  const runVerdicts = runs.map(runVerdict);
+  const okRuns = runVerdicts.filter((v) => v === 'ok').length;
+  const runningRuns = runVerdicts.filter((v) => v === 'running').length;
+  const failedRuns = runVerdicts.filter((v) => v === 'failed').length;
   const outcomeItems: PieItem[] = [
     { key: 'ok', label: 'Succeeded', value: okRuns },
-    { key: 'fail', label: 'Failed', value: runs.length - okRuns },
+    { key: 'fail', label: 'Failed', value: failedRuns },
+    { key: 'running', label: 'Running', value: runningRuns },
   ];
 
   return (

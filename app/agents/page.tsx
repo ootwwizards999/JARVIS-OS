@@ -5,6 +5,7 @@ import { ConductorChat } from '@/components/ConductorChat';
 import { AgentActivityFeed } from '@/components/AgentActivityFeed';
 import { AgentWorkPanel } from '@/components/AgentWorkPanel';
 import { recentActivity } from '@/lib/agents/activity';
+import { runVerdict } from '@/lib/agents/run-verdict';
 import { SparkIcon } from '@/components/SparkIcon';
 import { Badge, Dot, Label, SectionHead } from '@/components/terminal';
 import { lifeAreaForDepartment } from '@/lib/life-map';
@@ -89,16 +90,23 @@ function AgentRosterCard({
           <span className="truncate">{parent ? `under ${parent.name}` : `instance ${agent.instance}`}</span>
           <span className="shrink-0 uppercase tracking-wider">{agent.status}</span>
         </div>
-        {lastRun && (
-          <div className="flex items-baseline gap-1.5 font-mono text-[10px] leading-snug text-os-dim">
-            <span className={`font-bold ${lastRun.ok ? 'text-os-ok' : 'text-os-err'}`}>
-              {lastRun.ok ? 'OK' : 'FAIL'}
-            </span>
-            <span className="truncate" title={lastRun.summary}>
-              last check: {lastRun.summary.slice(0, 56)}
-            </span>
-          </div>
-        )}
+        {lastRun && (() => {
+          const verdict = runVerdict(lastRun);
+          return (
+            <div className="flex items-baseline gap-1.5 font-mono text-[10px] leading-snug text-os-dim">
+              <span
+                className={`font-bold ${
+                  verdict === 'running' ? 'text-os-warn' : verdict === 'ok' ? 'text-os-ok' : 'text-os-err'
+                }`}
+              >
+                {verdict === 'running' ? 'RUNNING' : verdict === 'ok' ? 'OK' : 'FAIL'}
+              </span>
+              <span className="truncate" title={lastRun.summary}>
+                last check: {verdict === 'running' ? 'in progress' : lastRun.summary.slice(0, 56)}
+              </span>
+            </div>
+          );
+        })()}
         <AgentChat agentId={agent.id} agentName={agent.name} initialMessages={messages} />
         <AgentWorkPanel agentId={agent.id} initialTasks={tasks} initialCrons={crons} />
       </div>
