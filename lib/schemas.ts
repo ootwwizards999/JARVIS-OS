@@ -555,11 +555,17 @@ export type BroadcastReply = z.infer<typeof BroadcastReplySchema>;
 // finishedAt is nullable at the zod/DB boundary (LCI-5 in-flight scheduler
 // claims have no finish time yet), but every pre-existing call site — the
 // manual Run-button path in lib/agents/runtime.ts, the pillar-radar and
-// KnowledgeGraph/NeuralDetail "last run" labels — assumes a run it reads is
-// already complete. Keeping the shared `AgentRun` type's finishedAt as a
-// plain string preserves that. The scheduler's write path (db.agentRuns.insert)
-// uses its own wider parameter type that allows the null claim value; reads
-// go through AgentRunSchema.parse, the actual runtime source of truth.
+// KnowledgeGraph/NeuralDetail "last run" labels, tests/runtime.test.ts's
+// finishedAt >= startedAt assertion — assumes a run it reads is already
+// complete. Keeping the shared `AgentRun` type's finishedAt as a plain
+// string preserves that (widening it to nullable breaks that frozen test's
+// typecheck — tried in LCI-5 review round 1, reverted). The scheduler's
+// write path (db.agentRuns.insert) uses its own wider parameter type that
+// allows the null claim value; reads go through AgentRunSchema.parse, the
+// actual runtime source of truth — callers that can actually see an
+// in-flight claim (KnowledgeGraph/NeuralDetail's "last run" card) must treat
+// finishedAt as possibly null at the READ site despite this type's claim;
+// see the review's F4 finding and each fixed call site's comment.
 export type AgentRun = Omit<z.infer<typeof AgentRunSchema>, 'finishedAt'> & { finishedAt: string };
 /** Insert-time shape: allows the null finishedAt of an in-flight scheduler claim. */
 export type AgentRunClaim = z.infer<typeof AgentRunSchema>;

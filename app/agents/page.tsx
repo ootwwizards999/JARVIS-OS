@@ -91,11 +91,15 @@ function AgentRosterCard({
         </div>
         {lastRun && (
           <div className="flex items-baseline gap-1.5 font-mono text-[10px] leading-snug text-os-dim">
-            <span className={`font-bold ${lastRun.ok ? 'text-os-ok' : 'text-os-err'}`}>
-              {lastRun.ok ? 'OK' : 'FAIL'}
+            <span
+              className={`font-bold ${
+                lastRun.status === 'running' ? 'text-os-warn' : lastRun.ok ? 'text-os-ok' : 'text-os-err'
+              }`}
+            >
+              {lastRun.status === 'running' ? 'RUNNING' : lastRun.ok ? 'OK' : 'FAIL'}
             </span>
             <span className="truncate" title={lastRun.summary}>
-              last check: {lastRun.summary.slice(0, 56)}
+              last check: {lastRun.status === 'running' ? 'in progress' : lastRun.summary.slice(0, 56)}
             </span>
           </div>
         )}

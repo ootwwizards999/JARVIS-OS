@@ -68,16 +68,23 @@ export function evaluateDispatch(db: FounderDb, req: DispatchRequest): DispatchD
     };
   }
 
+  // Fail CLOSED: a lane with no capacity policy gets no capacity, not
+  // unlimited capacity. `evaluateDispatch` is exported and takes an
+  // arbitrary `lane` string; only `resolveAgentLane`'s three known lanes are
+  // reachable today, but an unrecognized one must never bypass the gate
+  // (LCI-5 review round 1, F8).
   const cap = LANE_CAPS[req.lane];
-  if (cap !== undefined) {
-    const running = db.agentRuns.runningInLane(req.lane);
-    if (running >= cap) {
-      return {
-        permitted: false,
-        kind: 'capacity',
-        reason: `lane ${req.lane} is at capacity (${running}/${cap} running) — retry next tick`,
-      };
-    }
+  if (cap === undefined) {
+    return { permitted: false, kind: 'policy', reason: `unknown lane: ${req.lane} has no capacity policy defined` };
+  }
+
+  const running = db.agentRuns.runningInLane(req.lane);
+  if (running >= cap) {
+    return {
+      permitted: false,
+      kind: 'capacity',
+      reason: `lane ${req.lane} is at capacity (${running}/${cap} running) — retry next tick`,
+    };
   }
 
   return { permitted: true, reason: '' };

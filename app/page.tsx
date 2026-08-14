@@ -308,7 +308,9 @@ export default async function HomePage() {
                     </div>
                     <div className="mt-0.5 truncate font-mono text-[10.5px] text-os-dim">
                       {departments.get(a.departmentId) ?? '—'} ·{' '}
-                      {last ? `last run ${last.ok ? 'OK' : 'FAILED'} · ${relativeTime(last.finishedAt ?? last.startedAt)} ago` : 'never run'}
+                      {last
+                        ? `last run ${last.status === 'running' ? 'RUNNING' : last.ok ? 'OK' : 'FAILED'} · ${relativeTime(last.finishedAt ?? last.startedAt)} ago`
+                        : 'never run'}
                     </div>
                   </div>
                   <span

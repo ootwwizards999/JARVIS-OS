@@ -358,24 +358,34 @@ function migrateAgentRunsTable(db: InstanceType<typeof Database>): void {
 
   const finishedAtCol = info.find((c) => c.name === 'finished_at');
   if (finishedAtCol?.notnull) {
-    db.exec(`
-      CREATE TABLE agent_runs_new (
-        id TEXT PRIMARY KEY,
-        agent_id TEXT NOT NULL,
-        started_at TEXT NOT NULL,
-        finished_at TEXT,
-        ok INTEGER NOT NULL,
-        summary TEXT NOT NULL DEFAULT '',
-        status TEXT NOT NULL DEFAULT 'ok',
-        lane TEXT,
-        decision_type TEXT,
-        cron_id TEXT
-      );
-      INSERT INTO agent_runs_new (id, agent_id, started_at, finished_at, ok, summary, status, lane, decision_type, cron_id)
-        SELECT id, agent_id, started_at, finished_at, ok, summary, status, lane, decision_type, cron_id FROM agent_runs;
-      DROP TABLE agent_runs;
-      ALTER TABLE agent_runs_new RENAME TO agent_runs;
-    `);
+    // Atomic: CREATE + copy + DROP + RENAME all commit together or not at
+    // all (BEGIN IMMEDIATE also grabs the write lock up front, so a second
+    // process booting concurrently against the same file blocks — via
+    // busy_timeout below — instead of racing this rebuild). A crash mid-way
+    // now just rolls back to the untouched original table; the leading DROP
+    // IF EXISTS makes a retry idempotent even against a stray
+    // `agent_runs_new` left by an old, pre-fix crash. (LCI-5 review round 1, F2)
+    db.transaction(() => {
+      db.exec(`
+        DROP TABLE IF EXISTS agent_runs_new;
+        CREATE TABLE agent_runs_new (
+          id TEXT PRIMARY KEY,
+          agent_id TEXT NOT NULL,
+          started_at TEXT NOT NULL,
+          finished_at TEXT,
+          ok INTEGER NOT NULL,
+          summary TEXT NOT NULL DEFAULT '',
+          status TEXT NOT NULL DEFAULT 'ok',
+          lane TEXT,
+          decision_type TEXT,
+          cron_id TEXT
+        );
+        INSERT INTO agent_runs_new (id, agent_id, started_at, finished_at, ok, summary, status, lane, decision_type, cron_id)
+          SELECT id, agent_id, started_at, finished_at, ok, summary, status, lane, decision_type, cron_id FROM agent_runs;
+        DROP TABLE agent_runs;
+        ALTER TABLE agent_runs_new RENAME TO agent_runs;
+      `);
+    }).immediate();
   }
 }
 
@@ -412,6 +422,12 @@ function rowToAgent(row: AgentRow): Agent {
 export function openDb(path: string) {
   const db = new Database(path);
   db.pragma('journal_mode = WAL');
+  // Two processes on the same DB file (concurrent dev servers/sessions is
+  // the norm here) can both want the write lock at once — a boot-time
+  // migration or a scheduler tick's BEGIN IMMEDIATE. Without a busy timeout
+  // the loser gets an immediate SQLITE_BUSY throw instead of just waiting
+  // the few ms for the winner to commit. (LCI-5 review round 1, F2/F6)
+  db.pragma('busy_timeout = 5000');
   db.exec(DDL);
   migrateAgentsTable(db);
   migrateFunnelContactsTable(db);
@@ -598,7 +614,11 @@ export function openDb(path: string) {
     // AgentRunSchema.parse is the real runtime shape (finishedAt nullable for
     // an in-flight scheduler claim); the shared AgentRun type keeps finishedAt
     // as a plain string for the pre-LCI-5 call sites that assume completion —
-    // see the type's doc comment in lib/schemas.ts.
+    // see the type's doc comment in lib/schemas.ts. Reads that CAN see an
+    // in-flight claim (KnowledgeGraph/NeuralDetail's "last run" card) treat
+    // finishedAt as possibly null at the call site despite this type's claim
+    // (LCI-5 review round 1, F4) — the cast stays because widening the shared
+    // type breaks tests/runtime.test.ts's frozen finishedAt assertion.
     AgentRunSchema.parse({
       id: r.id,
       agentId: r.agent_id,
@@ -1180,6 +1200,15 @@ export function openDb(path: string) {
     sopTasks,
     workflows,
     skills,
+    /**
+     * Runs `fn` inside a single `BEGIN IMMEDIATE` transaction on this
+     * connection: the write lock is taken up front (not on first write), so
+     * a second process racing the same DB file blocks on `busy_timeout`
+     * instead of interleaving reads/writes with this one. Used by the
+     * scheduler tick to close the plan+claim cross-process TOCTOU (LCI-5
+     * review round 1, F6).
+     */
+    transaction: <T>(fn: () => T): T => db.transaction(fn).immediate(),
     close: () => db.close(),
   };
 }

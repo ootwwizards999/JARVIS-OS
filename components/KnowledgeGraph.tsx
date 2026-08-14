@@ -87,8 +87,12 @@ const EDGE_COLOR: Record<string, string> = {
 const shortLabel = (n: KGNode) =>
   n.kind === 'task' && n.label.length > 20 ? `${n.label.slice(0, 18).trimEnd()}…` : n.label;
 
-// 'about how long ago' for the harness card's last-run line
-const agoLabel = (iso: string): string => {
+// 'about how long ago' for the harness card's last-run line. `iso` is null
+// for an in-flight scheduler claim (no finish time yet) — return '' rather
+// than feeding `new Date(null)` (epoch) into the label (LCI-5 review round
+// 1, F4).
+const agoLabel = (iso: string | null): string => {
+  if (!iso) return '';
   const ms = Date.now() - new Date(iso).getTime();
   if (!Number.isFinite(ms) || ms < 0) return '';
   const m = Math.floor(ms / 60_000);

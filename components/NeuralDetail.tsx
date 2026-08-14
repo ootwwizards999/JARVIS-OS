@@ -20,7 +20,11 @@ import {
 const prettify = (slug: string) =>
   slug.split(/[-_]/).map((w) => w.charAt(0).toUpperCase() + w.slice(1)).join(' ');
 
-const agoLabel = (iso: string): string => {
+// `iso` is null for an in-flight scheduler claim (no finish time yet) —
+// return '' rather than feeding `new Date(null)` (epoch) into the label
+// (LCI-5 review round 1, F4).
+const agoLabel = (iso: string | null): string => {
+  if (!iso) return '';
   const ms = Date.now() - new Date(iso).getTime();
   if (!Number.isFinite(ms) || ms < 0) return '';
   const m = Math.floor(ms / 60_000);
@@ -72,7 +76,7 @@ export function NeuralDetail({
         parentName={parent?.name ?? null}
         parentAgentId={parent?.id ?? null}
         subAgents={subs}
-        lastRun={run ? { ok: run.ok, summary: run.summary } : null}
+        lastRun={run ? { ok: run.ok, summary: run.summary, status: run.status } : null}
         runLabel={run ? agoLabel(run.finishedAt) : null}
         headName={people.find((p) => p.departmentId === agent.departmentId)?.name ?? null}
         onClose={onClose}

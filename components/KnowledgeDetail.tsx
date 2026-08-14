@@ -151,7 +151,7 @@ export function AgentHarnessCard({
   parentName: string | null;
   parentAgentId: string | null;
   subAgents: { id: string; name: string }[];
-  lastRun: { ok: boolean; summary: string } | null;
+  lastRun: { ok: boolean; summary: string; status?: string } | null;
   /** relative time of the last run, precomputed by the caller */
   runLabel?: string | null;
   headName?: string | null;
@@ -238,10 +238,17 @@ export function AgentHarnessCard({
           <div className="flex items-start gap-2">
             <span
               className="mt-1 h-2 w-2 shrink-0 rounded-full"
-              style={{ background: lastRun.ok ? 'var(--ok, #3df08c)' : 'var(--err, #ff6259)' }}
+              style={{
+                background:
+                  lastRun.status === 'running'
+                    ? 'var(--warn, #ffb000)'
+                    : lastRun.ok
+                      ? 'var(--ok, #3df08c)'
+                      : 'var(--err, #ff6259)',
+              }}
             />
             <p className="text-[11px] leading-relaxed text-os-muted">
-              {lastRun.summary}
+              {lastRun.status === 'running' ? 'running…' : lastRun.summary}
               {runLabel && <span className="font-mono text-[9.5px] text-os-dim"> · {runLabel}</span>}
             </p>
           </div>
