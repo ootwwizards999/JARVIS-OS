@@ -121,16 +121,20 @@ describe('governor — autonomy model (requires + ceiling, both guards must pass
 
   describe('operator-allowed decision types (requires <= ceiling)', () => {
     test.each(allowedTypes)(
-      '$decisionType: permits at L$requires and above, denies below with a non-empty reason',
+      '$decisionType: permits at L$requires and above, denies below as competence',
       ({ decisionType, requires }) => {
         db = openDb(':memory:');
         // agent@requires+ permitted — the spec table's effect column, verbatim.
-        expect(evaluateDispatch(db, request({ decisionType, autonomy: requires })).permitted).toBe(true);
+        // Permits carry no denial discriminator (spec item 11).
+        const atRequires = evaluateDispatch(db, request({ decisionType, autonomy: requires }));
+        expect(atRequires.permitted).toBe(true);
+        expect(atRequires.kind).toBeUndefined();
         expect(evaluateDispatch(db, request({ decisionType, autonomy: 4 })).permitted).toBe(true);
 
         // Not trusted enough: one below the requirement.
         const denied = evaluateDispatch(db, request({ decisionType, autonomy: requires - 1 }));
         expect(denied.permitted).toBe(false);
+        expect(denied.kind).toBe('competence');
         expect(typeof denied.reason).toBe('string');
         expect(denied.reason).not.toBe('');
       },
@@ -140,6 +144,7 @@ describe('governor — autonomy model (requires + ceiling, both guards must pass
       db = openDb(':memory:');
       const decision = evaluateDispatch(db, request({ decisionType: 'code.implement', autonomy: 1 }));
       expect(decision.permitted).toBe(false);
+      expect(decision.kind).toBe('competence');
       expect(decision.reason).not.toBe('');
     });
 
@@ -157,6 +162,9 @@ describe('governor — autonomy model (requires + ceiling, both guards must pass
         for (const autonomy of [1, 2, 3, 4, 5]) {
           const decision = evaluateDispatch(db, request({ decisionType, autonomy }));
           expect(decision.permitted).toBe(false);
+          // Always 'policy' — including autonomy < requires, where BOTH guards
+          // fail and policy must win (spec item 11).
+          expect(decision.kind).toBe('policy');
           expect(typeof decision.reason).toBe('string');
           expect(decision.reason).not.toBe('');
         }
@@ -170,19 +178,27 @@ describe('governor — autonomy model (requires + ceiling, both guards must pass
       // agent — telling a low-autonomy agent it isn't trusted enough would
       // wrongly imply more trust could unlock it.
       db = openDb(':memory:');
-      const reasons = [1, 2, 3, 4, 5].map(
-        (autonomy) => evaluateDispatch(db, request({ decisionType: 'merge.arm', autonomy })).reason,
+      const decisions = [1, 2, 3, 4, 5].map(
+        (autonomy) => evaluateDispatch(db, request({ decisionType: 'merge.arm', autonomy })),
       );
-      expect(reasons[0]).not.toBe('');
-      for (const reason of reasons) expect(reason).toBe(reasons[0]);
+      expect(decisions[0].reason).not.toBe('');
+      for (const decision of decisions) {
+        expect(decision.reason).toBe(decisions[0].reason);
+        expect(decision.kind).toBe('policy');
+      }
     });
 
-    test('policy-forbids and not-trusted-enough produce different reasons at the same autonomy', () => {
+    test('policy-forbids and not-trusted-enough are distinguishable by kind AND reason at the same autonomy', () => {
       db = openDb(':memory:');
       const policy = evaluateDispatch(db, request({ decisionType: 'merge.arm', autonomy: 2 }));
       const competence = evaluateDispatch(db, request({ decisionType: 'code.implement', autonomy: 2 }));
       expect(policy.permitted).toBe(false);
       expect(competence.permitted).toBe(false);
+      // Machine-readable discriminator (spec item 11) — the dashboard renders
+      // "blocked by your policy" vs "agent needs promotion" from this field.
+      expect(policy.kind).toBe('policy');
+      expect(competence.kind).toBe('competence');
+      // Human-readable strings stay distinct too.
       expect(policy.reason).not.toBe('');
       expect(competence.reason).not.toBe('');
       expect(policy.reason).not.toBe(competence.reason);

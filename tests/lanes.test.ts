@@ -68,11 +68,14 @@ describe('fail-safe defaults hold on the real dispatch path (registry → govern
       autonomy: resolved.autonomy,
     });
     expect(decision.permitted).toBe(false);
+    // Specifically the not-trusted-enough denial (spec item 11): the agent
+    // could earn this capability; the operator has not forbidden it.
+    expect(decision.kind).toBe('competence');
     expect(typeof decision.reason).toBe('string');
     expect(decision.reason).not.toBe('');
 
-    // Specifically the not-trusted-enough denial, not the policy one: the
-    // reason must differ from a policy-forbidden denial for the same agent.
+    // The same unknown agent attempting a forbidden action gets the policy
+    // denial — distinguishable by kind and by reason.
     const policyDenied = evaluateDispatch(db, {
       agentId: UNKNOWN_AGENT,
       lane: resolved.lane,
@@ -80,6 +83,7 @@ describe('fail-safe defaults hold on the real dispatch path (registry → govern
       autonomy: resolved.autonomy,
     });
     expect(policyDenied.permitted).toBe(false);
+    expect(policyDenied.kind).toBe('policy');
     expect(decision.reason).not.toBe(policyDenied.reason);
   });
 
