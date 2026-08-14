@@ -25,6 +25,11 @@ const tick = () => new Request('http://localhost/api/scheduler/tick', { method: 
 
 type RunRow = Parameters<FounderDb['agentRuns']['insert']>[0];
 
+// Dispatching tests must use REGISTRY-SEEDED agent ids (lib/agents/real.ts
+// entries get { lane: 'no-build', autonomy: 2, decisionType: 'ticket.triage' },
+// which passes both autonomy guards). Under the corrected autonomy model an
+// UNREGISTERED agent resolves to autonomy 1 and is refused everything, so an
+// unknown id here would legitimately yield dispatched: 0.
 /** A cron that is due on EVERY minute — deterministic without freezing time. */
 function everyMinuteCron(db: FounderDb, id: string, agentId: string) {
   db.agentCrons.insert({
@@ -60,7 +65,7 @@ describe('POST /api/scheduler/tick', () => {
     const { getDb } = await import('@/lib/data');
     const { dispatchDecision } = await import('@/lib/agents/dispatch');
     const db = getDb();
-    everyMinuteCron(db, 'cron-shape', 'route-shape-agent');
+    everyMinuteCron(db, 'cron-shape', 'gmail-worker');
 
     const res = await POST(tick());
     expect(res.status).toBe(200);
@@ -70,7 +75,7 @@ describe('POST /api/scheduler/tick', () => {
 
     expect(vi.mocked(dispatchDecision)).toHaveBeenCalledTimes(1);
     expect(vi.mocked(dispatchDecision).mock.calls[0][0]).toMatchObject({
-      agentId: 'route-shape-agent',
+      agentId: 'gmail-worker',
       permitted: true,
     });
   });
@@ -79,14 +84,14 @@ describe('POST /api/scheduler/tick', () => {
     const { POST } = await import('@/app/api/scheduler/tick/route');
     const { getDb } = await import('@/lib/data');
     const db = getDb();
-    everyMinuteCron(db, 'cron-claims', 'route-claims-agent');
+    everyMinuteCron(db, 'cron-claims', 'slack-worker');
 
     const res = await POST(tick());
     expect((await res.json()).dispatched).toBe(1);
 
-    const runs = db.agentRuns.byAgent('route-claims-agent');
+    const runs = db.agentRuns.byAgent('slack-worker');
     expect(runs).toHaveLength(1);
-    expect(runs[0]).toMatchObject({ agentId: 'route-claims-agent', status: 'running' });
+    expect(runs[0]).toMatchObject({ agentId: 'slack-worker', status: 'running' });
     expect(runs[0].finishedAt).toBeNull();
   });
 
@@ -97,7 +102,7 @@ describe('POST /api/scheduler/tick', () => {
     // Warm module init + first-touch DB work outside the timed window; the
     // 100ms acceptance budget is for the tick itself, not cold start.
     await POST(tick());
-    everyMinuteCron(db, 'cron-timing', 'route-timing-agent');
+    everyMinuteCron(db, 'cron-timing', 'whatsapp-worker');
 
     const started = performance.now();
     const res = await POST(tick());
@@ -114,7 +119,7 @@ describe('POST /api/scheduler/tick', () => {
     const { dispatchDecision } = await import('@/lib/agents/dispatch');
     const db = getDb();
     await POST(tick()); // warm, outside the timed window
-    everyMinuteCron(db, 'cron-slow', 'route-slow-agent');
+    everyMinuteCron(db, 'cron-slow', 'zernio-publisher');
 
     let workerFinished = false;
     let worker: Promise<void> = Promise.resolve();
